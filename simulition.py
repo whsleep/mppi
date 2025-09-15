@@ -4,8 +4,7 @@ from MppiSolver import MppiplanSolver
 from irsim.lib.path_planners.a_star import AStarPlanner
 from matplotlib import pyplot as plt
 
-import cv2
-from sklearn.cluster import DBSCAN
+
 
 
 def generate_reference_path( start_point, end_point, num_points=100):
