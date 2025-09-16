@@ -6,36 +6,6 @@ from matplotlib import pyplot as plt
 
 
 
-
-def generate_reference_path( start_point, end_point, num_points=100):
-    """
-    生成一条从起点到终点的直线路径
-
-    参数:
-        start_point: 起点坐标，格式为 (x_start, y_start)
-        end_point: 终点坐标，格式为 (x_end, y_end)
-        num_points: 路径点的数量
-
-    返回:
-        ref_path: 参考路径数组，形状为 (num_points, 4)，
-                  每一行包含 [x, y, yaw, v]
-    """
-    # 线性插值得到x和y坐标
-    ref_x = np.linspace(start_point[0], end_point[0], num_points)
-    ref_y = np.linspace(start_point[1], end_point[1], num_points)
-
-    # 计算航向角（yaw）。对于直线，航向角是固定的。
-    dx = end_point[0] - start_point[0]
-    dy = end_point[1] - start_point[1]
-    constant_yaw = np.arctan2(dy, dx)  # 计算起点指向终点的角度
-    ref_yaw = np.full_like(ref_x, constant_yaw)  # 所有点的航向角都相同
-
-    # 设置速度，这里假设恒速
-    ref_v = np.full_like(ref_x, 5.0)
-
-    return np.vstack([ref_x, ref_y, ref_yaw, ref_v]).T
-
-
 class SIM_ENV:
     def __init__(self, world_file="robot_world.yaml", render=False):
 

@@ -212,8 +212,8 @@ class MppiplanSolver:
 
         # _, ref_x, ref_y, ref_yaw, ref_v = self._get_nearest_waypoint(x, y)
         terminal_cost = self.terminal_cost_weight[0] * (x - self.xf[0]) ** 2 + \
-                        self.terminal_cost_weight[1] * (y - self.xf[1]) ** 2
-                        # self.terminal_cost_weight[2] * (yaw - ) ** 2 + \
+                        self.terminal_cost_weight[1] * (y - self.xf[1]) ** 2 + \
+                        self.terminal_cost_weight[2] * (yaw - 135) ** 2 
                         # self.terminal_cost_weight[3] * (v - ref_v) ** 2
         # obstacle_cost = self.obstacle_cost_weight * self._obstacle_cost(x, y)
         return terminal_cost
@@ -225,8 +225,8 @@ class MppiplanSolver:
 
 
         stage_cost = self.stage_cost_weight[0] * (x - self.xf[0]) ** 2 + \
-                     self.stage_cost_weight[1] * (y - self.xf[1]) ** 2
-                     # self.stage_cost_weight[2] * (yaw - ref_yaw) ** 2 + \
+                     self.stage_cost_weight[1] * (y - self.xf[1]) ** 2 + \
+                     self.stage_cost_weight[2] * (yaw - 135) ** 2 
                      # self.stage_cost_weight[3] * (v - ref_v) ** 2
 
         # obstacle_cost = self.obstacle_cost_weight * self._obstacle_cost(x, y)
