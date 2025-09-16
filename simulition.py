@@ -13,7 +13,7 @@ class SIM_ENV:
         self.env = EnvBase(world_file, display=render, disable_all_plot=not render,save_ani = True)
         # 环境参数
         self.robot_goal = self.env.get_robot_info(0).goal
-        self.lidar_r = 0.5
+        self.lidar_r = 5
         data = self.env.get_map()
         # # 全局规划器
         start = self.env.get_robot_state().T
@@ -35,8 +35,8 @@ class SIM_ENV:
         self.solver = MppiplanSolver(np.array([0.0,0.0,0.0,0.0]),np.array([0.0,0.0,0.0,0.0]))
 
         # 速度指令
-        self.v = 1
-        self.w = 1
+        self.v = 0.0
+        self.w = 0.0
         self.robot_state = [[1.5],[8.5],[0.],[0.]]
         self.robot_state = np.array(self.robot_state)
         self.env.draw_trajectory(traj=self.global_path.T, traj_type="--y")
@@ -51,7 +51,8 @@ class SIM_ENV:
         if self.env.display:
             self.env.render()
 
-
+        # TODO
+        self.robot_state = self.env.get_robot_state()
         scan_data = self.env.get_lidar_scan()
         obs_list, center_list = self.scan_box(self.robot_state, scan_data)
 
@@ -80,8 +81,8 @@ class SIM_ENV:
         # plt.grid(True)
         # plt.show()
         # 轨迹可视化
-        # traj_list = [np.array([[xy[0]], [xy[1]]]) for xy in traj_xy]
-        # self.env.draw_trajectory(traj_list, 'g--', refresh=True)
+        traj_list = [np.array([[x], [y]]) for x, y in xy]
+        self.env.draw_trajectory(traj_list, 'b-', refresh=True)
 
 
 
