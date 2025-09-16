@@ -56,7 +56,7 @@ class SIM_ENV:
         self.global_path = self.global_path[:, ::-1].T
         self.path_index = 0
 
-        self.global_path = self.global_path[:, ::-1].T
+       
 
 
 
@@ -94,9 +94,9 @@ class SIM_ENV:
 
         # 求解局部最优轨迹
         optimal_input, _,xy, sampled_traj_list= self.solver.calc_control_input(self.robot_state.squeeze(),current_goal.squeeze())
-        self.v = optimal_input[0]*10
+        self.v = optimal_input[0]
         self.w = optimal_input[1]
-        self.update(optimal_input,self.robot_state)
+        # self.update(optimal_input,self.robot_state)
         # traj_xy = optimal_traj[:, :2]
         # x = xy[:, 0]  # x坐标
         # y = xy[:, 1]  # y坐标
@@ -183,7 +183,7 @@ class SIM_ENV:
         robot_xy = robot_state.reshape(-1)  # 将(2,1)重塑为(2,)
 
         # 计算路径上每个点到机器人位置的距离
-        dists = np.linalg.norm(path - robot_xy[:2], axis=1)
+        dists = np.linalg.norm(path- robot_xy[:2], axis=1)
 
         # 2. 更新 path_index 为最近点索引（防止倒退）
         nearest_idx = int(np.argmin(dists))
@@ -201,7 +201,7 @@ class SIM_ENV:
         if not found:
             # 如果没找到，使用全局目标点
             goal_index = len(path) - 1
-            target_x, target_y = path[goal_index]
+            target_x, target_y = path.T[goal_index]
             target_theta = self.robot_goal[-1]
         else:
             # 如果找到，使用路径上的点
