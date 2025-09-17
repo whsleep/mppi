@@ -13,7 +13,7 @@ class SIM_ENV:
         self.env = EnvBase(world_file, display=render, disable_all_plot=not render,save_ani = True)
         # 环境参数
         self.robot_goal = self.env.get_robot_info(0).goal
-        self.lidar_r = 5
+        self.lidar_r = 2
         data = self.env.get_map()
         # # 全局规划器
         start = self.env.get_robot_state().T
@@ -67,7 +67,8 @@ class SIM_ENV:
         optimal_input, _,xy, sampled_traj_list= self.solver.calc_control_input(self.robot_state.squeeze(),current_goal.squeeze())
         self.v = optimal_input[0]
         self.w = optimal_input[1]
-        # self.update(optimal_input,self.robot_state)
+        print(self.v,self.w)
+        self.update(optimal_input,self.robot_state)
         # traj_xy = optimal_traj[:, :2]
         # x = xy[:, 0]  # x坐标
         # y = xy[:, 1]  # y坐标
@@ -172,7 +173,7 @@ class SIM_ENV:
         if not found:
             # 如果没找到，使用全局目标点
             goal_index = len(path) - 1
-            target_x, target_y = path.T[goal_index]
+            target_x, target_y = path[goal_index]
             target_theta = self.robot_goal[-1]
         else:
             # 如果找到，使用路径上的点
@@ -186,8 +187,10 @@ class SIM_ENV:
         """计算下一时刻状态（运动学模型）"""
         delta_t = 0.1
 
-        steer = np.clip(u[0], -np.deg2rad(30.0),np.deg2rad(30.0) )
-        accel = np.clip(u[1], -2, 2)
+        # steer = np.clip(u[0], -np.deg2rad(30.0),np.deg2rad(30.0) )
+        # accel = np.clip(u[1], -2, 2)
+        steer = u[0]
+        accel = u[1]
 
         robot_state[0] += robot_state[3] * np.cos(robot_state[2]) * delta_t
         robot_state[1] += robot_state[3] * np.sin(robot_state[2]) * delta_t
