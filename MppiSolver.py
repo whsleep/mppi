@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 class MppiplanSolver:
     """局部规划求解器（支持障碍约束自适应、轨迹点数量自动调整）"""
     
-    def __init__(self, x0, xf, obstacles=None, n=None, safe_distance=0.80,
+    def __init__(self, x0, xf,xg, obstacles=None, n=None, safe_distance=0.80,
                  v_max=1.0, omega_max=1.0, r_min=0.5, a_max=2.0, epsilon=1e-2,
                  w_p=0.5, w_t=1.0, w_kin=4.0, w_r=4.0, w_obs=10.0, T_min=0.05, T_max=0.2):
         """
@@ -21,15 +21,15 @@ class MppiplanSolver:
         """
         self.dim_x = 4  # 状态维度 [x,y,yaw,v]
         self.dim_u = 2  # 控制维度 [steer,accel]
-        self.T = 20  # 预测时域长度（步数）
-        self.K = 500  # 采样数量K（生成K条轨迹）
+        self.T = 10  # 预测时域长度（步数）
+        self.K = 100  # 采样数量K（生成K条轨迹）
         self.param_exploration = 0.0  # 探索率（0~1，比例越高探索越强）
         self.param_lambda = 100.0  # 温度参数（控制权重分布陡峭度）
         self.param_alpha = 0.98  # 衰减因子（控制历史信息保留程度）
         self.sigma = np.array([[0.075, 0.0], [0.0, 2.0]])  # 控制噪声协方差矩阵Σ（控制探索强度）
         self.stage_cost_weight = np.array([50.0, 50.0, 1.0, 20.0])  # 阶段成本权重矩阵
         self.input_cost_weight = 1.0  # 输入成本权重矩阵
-        self.terminal_cost_weight = np.array([100.0, 100.0, 1.0, 20.0])  # 终端成本权重矩阵
+        self.terminal_cost_weight = np.array([100.0, 100.0, 100.0, 20.0])  # 终端成本权重矩阵
         self.max_search_idx_len = 50  # 搜索最近参考点索引长度
         # self.visualize_sampled_trajs = True  # 是否可视化采样轨迹
         # self.visualize_optimal_traj = True  # 是否可视化最优轨迹
@@ -38,6 +38,7 @@ class MppiplanSolver:
         self.max_repulsive_force = 15.0  # 最大斥力
 
         self.u_prev = np.zeros((self.T, self.dim_u))
+
         self.pre_waypoints_idx = 0
 
         self.max_steer_abs = np.deg2rad(30.0)  # 最大转向角（弧度）
@@ -46,6 +47,8 @@ class MppiplanSolver:
 
         self.x0 = np.array(x0)
         self.xf = np.array(xf)
+        self.xg = np.array(xg)
+
         self.obstacles = obstacles
         self.wheel_base = 2.5
         self.delta_t = 0.1
@@ -75,13 +78,15 @@ class MppiplanSolver:
 
         return total_cost
 
-    def calc_control_input(self, x0,xf):
+    def calc_control_input(self, x0,xf,xg):
         """计算控制输入"""
         u = self.u_prev
         if x0 is not None:
             self.x0 = np.array(x0)
         if xf is not None:
             self.xf = np.array(xf)
+        if xg is not None:
+            self.xf = np.array(xg)
 
 
 
@@ -99,6 +104,7 @@ class MppiplanSolver:
         #
         # 1. 采样噪声序列
         epsilon = self._calc_epsilon(self.sigma, self.K, self.T, self.dim_u)
+        # epsilon[:] = 0
         #
         # 初始化带噪声的控制序列
         v = np.zeros((self.K, self.T, self.dim_u))
@@ -118,11 +124,12 @@ class MppiplanSolver:
                 # 更新状态
                 x = self._next_x(x, v_clamped)
                 # 累积成本
-                S[k] += self._stage_cost(x) + self.input_cost_weight * np.linalg.norm(
-                    u[t - 1]) ** 2 + self.param_gamma * u[t - 1].T @ np.linalg.inv(self.sigma) @ v[k, t - 1]
+                S[k] += 10*self._stage_cost(x) + self.input_cost_weight * np.linalg.norm( u[t - 1]) ** 2 + 10*self.param_gamma * u[t - 1].T @ np.linalg.inv(self.sigma) @ v[k, t - 1]
+            # self.input_cost_weight * np.linalg.norm( u[t - 1]) ** 2
+            # self.param_gamma * u[t - 1].T @ np.linalg.inv(self.sigma) @ v[k, t - 1]
 
             # 添加终端成本
-            S[k] += self._terminal_cost(x)
+            S[k] += 10*self._terminal_cost(x)
 
         # 3. 计算每条轨迹的权重
         w = self._calc_weights(S)
@@ -211,10 +218,10 @@ class MppiplanSolver:
         yaw = ((yaw + 2.0 * np.pi) % (2.0 * np.pi))
 
         # _, ref_x, ref_y, ref_yaw, ref_v = self._get_nearest_waypoint(x, y)
-        terminal_cost = self.terminal_cost_weight[0] * (x - self.xf[0]) ** 2 + \
-                        self.terminal_cost_weight[1] * (y - self.xf[1]) ** 2 + \
-                        self.terminal_cost_weight[2] * (yaw - 45) ** 2 
-                        # self.terminal_cost_weight[3] * (v - ref_v) ** 2
+        terminal_cost = self.terminal_cost_weight[0] * (x - self.xg[0]) ** 2 + \
+                        self.terminal_cost_weight[1] * (y - self.xg[1]) ** 2 + \
+                        self.terminal_cost_weight[2] * (yaw - 5.498) ** 2  + \
+                        self.terminal_cost_weight[3] * (v - 0) ** 2
         # obstacle_cost = self.obstacle_cost_weight * self._obstacle_cost(x, y)
         return terminal_cost
 
@@ -226,27 +233,64 @@ class MppiplanSolver:
 
         stage_cost = self.stage_cost_weight[0] * (x - self.xf[0]) ** 2 + \
                      self.stage_cost_weight[1] * (y - self.xf[1]) ** 2 + \
-                     self.stage_cost_weight[2] * (yaw - 45) ** 2 
+                     self.stage_cost_weight[2] * (yaw - 5.498) ** 2 
                      # self.stage_cost_weight[3] * (v - ref_v) ** 2
 
         # obstacle_cost = self.obstacle_cost_weight * self._obstacle_cost(x, y)
 
         return stage_cost
 
-    def _next_x(self, x_t, v_t):
-        """计算下一时刻状态（运动学模型）"""
+    # def _next_x(self, x_t, v_t):
+    #     """计算下一时刻状态（运动学模型）"""
+    #     x, y, yaw, v = x_t
+    #     steer, accel = v_t
+
+    #     l = self.wheel_base
+    #     dt = self.delta_t
+
+    #     new_x = x + v * np.cos(yaw) * dt
+    #     new_y = y + v * np.sin(yaw) * dt
+    #     new_yaw = yaw + v / l * np.tan(steer) * dt
+    #     new_v = v + accel * dt
+
+    #     return np.array([new_x, new_y, new_yaw, new_v])
+    def _next_x(self, x_t: np.ndarray, v_t: list) -> np.ndarray:
+        """
+        对外接口保持第二种形式：
+        x_t = [x, y, yaw, v]        # 4×1 或 4 维向量
+        v_t = [steer, accel]        # 2 维列表/数组
+        返回 4×1 或 1 维向量（与输入形状一致）
+        """
+        # 统一转 1-D 数组，最后再 reshape 回去
+        x_t   = np.asarray(x_t).ravel()
+        steer, accel = v_t[0], v_t[1]
+
         x, y, yaw, v = x_t
-        steer, accel = v_t
 
-        l = self.wheel_base
-        dt = self.delta_t
+        # 内部状态扩展：把当前真实转角 δ 存在最后一个元素
+        # 第一次调用时若长度=4，自动补 δ=0
+        if len(x_t) == 4:
+            delta = 0.0
+        else:
+            delta = x_t[4]
 
-        new_x = x + v * np.cos(yaw) * dt
-        new_y = y + v * np.sin(yaw) * dt
-        new_yaw = yaw + v / l * np.tan(steer) * dt
-        new_v = v + accel * dt
+        # 1. 转向一阶动态  δ̇ = (steer - δ)/τ
+        delta_dot = (steer - delta) / 0.05
+        new_delta = delta + delta_dot * self.delta_t
 
-        return np.array([new_x, new_y, new_yaw, new_v])
+        # 2. 速度积分
+        new_v = v + accel * self.delta_t
+
+        # 3. 运动学
+        new_x   = x + v * np.cos(yaw) * self.delta_t
+        new_y   = y + v * np.sin(yaw) * self.delta_t
+        new_yaw = yaw + v / self.wheel_base * np.tan(new_delta) * self.delta_t
+
+        # 4. 角度归一化
+        new_yaw = np.arctan2(np.sin(new_yaw), np.cos(new_yaw))
+
+        # 5. 返回形状与输入一致（4 维，隐藏 δ）
+        return np.array([new_x, new_y, new_yaw, new_v]).reshape(np.asarray(x_t).shape)
 
     def _u_clamp(self, u):
         """限制控制输入在可行范围内"""

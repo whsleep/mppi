@@ -12,7 +12,7 @@ robot:
   - kinematics: {name: 'acker'}
     shape: {name: 'rectangle', length: 0.4, width: 0.2 , wheelbase: 0.25}
     state: [1.5, 8.5, 0, 0]
-    goal: [8.5, 1.5, 0]
+    goal: [8.5, 1.5, 135]
     goal_threshold: 0.1
 
     sensors:

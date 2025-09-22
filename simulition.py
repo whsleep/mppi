@@ -13,14 +13,13 @@ class SIM_ENV:
         self.env = EnvBase(world_file, display=render, disable_all_plot=not render,save_ani = True)
         # 环境参数
         self.robot_goal = self.env.get_robot_info(0).goal
-        self.lidar_r = 2
+        self.lidar_r = 1.5
         data = self.env.get_map()
         # # 全局规划器
         start = self.env.get_robot_state().T
         start = start[0, :2].squeeze()
         end = self.robot_goal.T
         end = end[0, :2].squeeze()
-
         self.planner = AStarPlanner(data, data.resolution)
         self.global_path = self.planner.planning(start, end, show_animation=False)
         self.global_path = self.global_path[:, ::-1].T
@@ -32,7 +31,7 @@ class SIM_ENV:
 
         # 局部求解器
 
-        self.solver = MppiplanSolver(np.array([0.0,0.0,0.0,0.0]),np.array([0.0,0.0,0.0,0.0]))
+        self.solver = MppiplanSolver(np.array([0.0,0.0,0.0,0.0]),np.array([0.0,0.0,0.0,0.0]),[8.5, 1.5])
 
         # 速度指令
         self.v = 0.0
@@ -44,7 +43,7 @@ class SIM_ENV:
         # for obs in obs_list:
         #     self.env.draw_box(obs, refresh=True, color="-b")
 
-    def step(self, ):
+    def step(self,):
         # 环境单步仿真
         self.env.step(action_id=0, action=np.array([[self.v], [self.w]]))
         # 环境可视化
@@ -64,11 +63,11 @@ class SIM_ENV:
         self.env.draw_points(current_goal[:2], c="r", refresh=True)
 
         # 求解局部最优轨迹
-        optimal_input, _,xy, sampled_traj_list= self.solver.calc_control_input(self.robot_state.squeeze(),current_goal.squeeze())
+        optimal_input, _,xy, sampled_traj_list= self.solver.calc_control_input(self.robot_state.squeeze(),current_goal.squeeze(),[8.5, 1.5])
         self.v = optimal_input[0]
         self.w = optimal_input[1]
         print(self.v,self.w)
-        self.update(optimal_input,self.robot_state)
+        self.update(self.robot_state,optimal_input)
         # traj_xy = optimal_traj[:, :2]
         # x = xy[:, 0]  # x坐标
         # y = xy[:, 1]  # y坐标
@@ -183,18 +182,59 @@ class SIM_ENV:
         # 返回目标点和朝向
         return np.array([[target_x], [target_y], target_theta])
 
-    def update(self, u,robot_state):
-        """计算下一时刻状态（运动学模型）"""
-        delta_t = 0.1
+    # def update(self, u,robot_state):
+    #     """计算下一时刻状态（运动学模型）"""
+    #     delta_t = 0.1
 
-        # steer = np.clip(u[0], -np.deg2rad(30.0),np.deg2rad(30.0) )
-        # accel = np.clip(u[1], -2, 2)
-        steer = u[0]
-        accel = u[1]
+    #     # steer = np.clip(u[0], -np.deg2rad(30.0),np.deg2rad(30.0) )
+    #     # accel = np.clip(u[1], -2, 2)
+    #     steer = u[0]
+    #     accel = u[1]
 
-        robot_state[0] += robot_state[3] * np.cos(robot_state[2]) * delta_t
-        robot_state[1] += robot_state[3] * np.sin(robot_state[2]) * delta_t
-        robot_state[2] += robot_state[3] / 0.25 * np.tan(steer) * delta_t
-        robot_state[3] += accel * delta_t
+    #     robot_state[0] += robot_state[3] * np.cos(robot_state[2]) * delta_t
+    #     robot_state[1] += robot_state[3] * np.sin(robot_state[2]) * delta_t
+    #     robot_state[2] += robot_state[3] / 0.25 * np.tan(steer) * delta_t
+    #     robot_state[3] += accel * delta_t
+
+    def update(self, robot_state: np.ndarray, u: list) -> np.ndarray:
+        """
+        对外接口保持第二种形式：
+        robot_state = [x, y, yaw, v]        # 4×1 或 4 维向量
+        u = [steer, accel]        # 2 维列表/数组
+        返回 4×1 或 1 维向量（与输入形状一致）
+        """
+        # 统一转 1-D 数组，最后再 reshape 回去
+        robot_state   = np.asarray(robot_state).ravel()
+        steer, accel = u[0], u[1]
+    
+        x, y, yaw, v = robot_state
+
+        # 内部状态扩展：把当前真实转角 δ 存在最后一个元素
+        # 第一次调用时若长度=4，自动补 δ=0
+        if len(robot_state) == 4:
+            delta = 0.0
+        else:
+            delta = robot_state[4]
+
+        # 1. 转向一阶动态  δ̇ = (steer - δ)/τ
+        delta_dot = (steer - delta) / 0.05
+        new_delta = delta + delta_dot * 0.1
+
+        # 2. 速度积分
+        new_v = v + accel * 0.1
+
+        # 3. 运动学
+        new_x   = x + v * np.cos(yaw) * 0.1
+        new_y   = y + v * np.sin(yaw) * 0.1
+        new_yaw = yaw + v / 0.25 * np.tan(new_delta) * 0.1
+
+        # 4. 角度归一化
+        new_yaw = np.arctan2(np.sin(new_yaw), np.cos(new_yaw))
+        robot_state[0] = new_x
+        robot_state[1] = new_y
+        robot_state[2] = new_yaw
+        robot_state[3] = new_v
+
+
 
 
