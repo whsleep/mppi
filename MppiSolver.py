@@ -4,19 +4,19 @@ import math
 
 class MppiplanSolver:
     def __init__(self, 
-                delta_t: float = 0.5,
+                delta_t: float = 0.1,
                 wheel_base: float = 3.0, # [m]
                 max_steer_abs: float = 1.0, # [rad]
                 max_vel_abs: float = 5.0, # [m/s]
                 ref_path: np.ndarray = np.array([[0.0, 0.0, 0.0, 1.0], [10.0, 0.0, 0.0, 1.0]]),
                 horizon_step_T: int = 20,
-                number_of_samples_K: int = 10,
+                number_of_samples_K: int = 50,
                 param_exploration: float = 0.0,
                 param_lambda: float = 50.0,
                 param_alpha: float = 1.0,
                 sigma: np.ndarray = np.array([[0.5, 0.0], [0.0, 0.1]]), 
-                stage_cost_weight: np.ndarray = np.array([50.0, 50.0, 30.0, 0.0]), # weight for [x, y, theta, beta]
-                terminal_cost_weight: np.ndarray = np.array([50.0, 50.0, 30.0, 0.0]), # weight for [x, y, theta, beta]
+                stage_cost_weight: np.ndarray = np.array([20.0, 20.0, 20.0, 1.0]), # weight for [x, y, theta, beta]
+                terminal_cost_weight: np.ndarray = np.array([50.0, 50.0, 50.0, 1.0]), # weight for [x, y, theta, beta]
                 visualize_optimal_traj = True,  # if True, optimal trajectory is visualized
                 visualze_sampled_trajs = True, # if True, sampled trajectories are visualized
                  ):
@@ -74,6 +74,7 @@ class MppiplanSolver:
         for k in range(self.K):         
             # 设定采样初始值
             x = x0
+            current_vel = 0.0
             # 单条轨迹前向推进
             for t in range(1, self.T+1):
                 # 添加噪声的比例
@@ -84,11 +85,13 @@ class MppiplanSolver:
                     # 仅添加噪声
                     v[k, t-1] = epsilon[k, t-1]
                 # 前向推进
-                x = self._F(x, self._g(v[k, t-1]))
-                # 添加阶段代价
-                S[k] += self._c(x) + self.param_gamma * u[t-1].T @ np.linalg.inv(self.Sigma) @ v[k, t-1]
+                u_clamped = self._g(v[k, t-1]) 
+                x = self._F(x, u_clamped)
+                current_vel = u_clamped[0] 
+                # 添加阶段代价  
+                S[k] += self._c(x, current_vel) + self.param_gamma * u[t-1].T @ np.linalg.inv(self.Sigma) @ v[k, t-1]
             # 添加终端代价
-            S[k] += self._phi(x)
+            S[k] += self._phi(x, current_vel)
 
         # compute information theoretic weights for each sample
         w = self._compute_weights(S)
@@ -172,7 +175,7 @@ class MppiplanSolver:
         new_x = x + vel * np.cos(theta) * dt
         new_y = y + vel * np.sin(theta) * dt
         new_theta = theta + vel * np.tan(steer)/l * dt
-        new_theta = np.arctan(np.sin(new_theta)/np.cos(new_theta)) # normalize theta to [-pi, pi]
+        new_theta = ((new_theta + 2.0*np.pi) % (2.0*np.pi)) # normalize theta to [0, 2*pi]
         new_beta = steer
 
         # return updated state
@@ -182,7 +185,7 @@ class MppiplanSolver:
     """
     根据状态计算阶段成本
     """
-    def _c(self, x_t: np.ndarray) -> float:
+    def _c(self, x_t: np.ndarray, current_vel: float) -> float:
         """calculate stage cost"""
         # parse x_t
         x, y, theta, beta = x_t
@@ -191,13 +194,13 @@ class MppiplanSolver:
         # calculate stage cost
         _, ref_x, ref_y, ref_theta, ref_v = self._get_nearest_waypoint(x, y)
         stage_cost = self.stage_cost_weight[0]*(x-ref_x)**2 + self.stage_cost_weight[1]*(y-ref_y)**2 + \
-                     self.stage_cost_weight[2]*(theta-ref_theta)**2 + self.stage_cost_weight[3]*(beta-0)**2
+                     self.stage_cost_weight[2]*(theta-ref_theta)**2 + self.stage_cost_weight[3]*(current_vel - ref_v)**2
         return stage_cost
     
     """
     根据状态计算终端成本
     """
-    def _phi(self, x_T: np.ndarray) -> float:
+    def _phi(self, x_T: np.ndarray, current_vel: float) -> float:
         """calculate terminal cost"""
         # parse x_T
         x, y, theta, beta = x_T
@@ -206,7 +209,7 @@ class MppiplanSolver:
         # calculate terminal cost
         _, ref_x, ref_y, ref_theta, ref_v = self._get_nearest_waypoint(x, y)
         terminal_cost = self.terminal_cost_weight[0]*(x-ref_x)**2 + self.terminal_cost_weight[1]*(y-ref_y)**2 + \
-                        self.terminal_cost_weight[2]*(theta-ref_theta)**2 + self.terminal_cost_weight[3]*(beta-0)**2
+                        self.terminal_cost_weight[2]*(theta-ref_theta)**2 + self.terminal_cost_weight[3]*(current_vel - ref_v)**2
         return terminal_cost
 
     """
@@ -255,7 +258,7 @@ class MppiplanSolver:
     def _get_nearest_waypoint(self, x: float, y: float, update_prev_idx: bool = False):
         """search the closest waypoint to the vehicle on the reference path"""
         # 仅仅检索前方一定范围的点以节省计算时间
-        SEARCH_IDX_LEN = 100 # [points] forward search range
+        SEARCH_IDX_LEN = 200 # [points] forward search range
         # 记录上次最近点的索引以加速搜索
         prev_idx = self.prev_waypoints_idx
         dx = [x - ref_x for ref_x in self.ref_path[prev_idx:(prev_idx + SEARCH_IDX_LEN), 0]]

@@ -16,7 +16,7 @@ robot:
     goal_threshold: 0.1
     vel_min: [-5, -1]
     vel_max: [5, 1]
-    goal_threshold: 0.3
+    goal_threshold: 1.0
     # sensors:
     #   - type: 'lidar2d'
     #     range_min: 0
@@ -30,5 +30,5 @@ robot:
 
 
     plot:
-      show_trail: false
+      show_trail: true
       show_goal: true
