@@ -23,7 +23,7 @@ python run.py
 
 ## Demonstration
 
-![mppi_demo](./animation/animation.gif)
+![mppi_demo](./animation/animation_new.gif)
 
 # References
 
