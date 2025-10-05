@@ -1,281 +1,369 @@
-
+import torch
 import numpy as np
 import math
 
 class MppiplanSolver:
     def __init__(self, 
                 delta_t: float = 0.1,
-                wheel_base: float = 3.0, # [m]
-                max_steer_abs: float = 1.0, # [rad]
-                max_vel_abs: float = 5.0, # [m/s]
+                wheel_base: float = 3.0,
+                max_steer_abs: float = 1.0,
+                max_vel_abs: float = 5.0,
                 ref_path: np.ndarray = np.array([[0.0, 0.0, 0.0, 1.0], [10.0, 0.0, 0.0, 1.0]]),
                 horizon_step_T: int = 20,
-                number_of_samples_K: int = 50,
+                number_of_samples_K: int = 200,
                 param_exploration: float = 0.0,
                 param_lambda: float = 50.0,
                 param_alpha: float = 1.0,
                 sigma: np.ndarray = np.array([[0.5, 0.0], [0.0, 0.1]]), 
-                stage_cost_weight: np.ndarray = np.array([20.0, 20.0, 20.0, 1.0]), # weight for [x, y, theta, beta]
-                terminal_cost_weight: np.ndarray = np.array([50.0, 50.0, 50.0, 1.0]), # weight for [x, y, theta, beta]
-                visualize_optimal_traj = True,  # if True, optimal trajectory is visualized
-                visualze_sampled_trajs = True, # if True, sampled trajectories are visualized
+                stage_cost_weight: np.ndarray = np.array([20.0, 20.0, 20.0, 1.0]),
+                terminal_cost_weight: np.ndarray = np.array([50.0, 50.0, 50.0, 1.0]),
+                visualize_optimal_traj: bool = True,
+                visualze_sampled_trajs: bool = True,
+                device: str = "cuda" if torch.cuda.is_available() else "cpu"
                  ):
-  
-        """初始化mppi参数"""
-        self.dim_x = 4 # 状态维度
-        self.dim_u = 2 # 控制维度
-        self.T = horizon_step_T # 预测视野
-        self.K = number_of_samples_K # 采样轨迹数量
-        self.param_exploration = param_exploration  # mppi常量参数
-        self.param_lambda = param_lambda  # mppi常量参数
-        self.param_alpha = param_alpha # mppi常量参数
-        self.param_gamma = self.param_lambda * (1.0 - (self.param_alpha))  # mppi常量参数
-        self.Sigma = sigma # 噪声偏差
-        self.stage_cost_weight = stage_cost_weight
-        self.terminal_cost_weight = terminal_cost_weight
+        """初始化GPU加速的MPPI参数"""
+        self.dim_x = 4
+        self.dim_u = 2
+        self.T = horizon_step_T
+        self.K = number_of_samples_K
+        self.device = device  # 设备选择（GPU或CPU）
+
+        # 算法参数（转换为GPU张量）
+        self.param_exploration = param_exploration
+        self.param_lambda = torch.tensor(param_lambda, device=device)
+        self.param_alpha = param_alpha
+        self.param_gamma = self.param_lambda * (1.0 - self.param_alpha)
+        
+        # 协方差矩阵及其逆（转换为GPU张量）
+        self.Sigma = torch.tensor(sigma, device=device, dtype=torch.float32)
+        self.inv_Sigma = torch.inverse(self.Sigma)
+        
+        # 成本权重（转换为GPU张量）
+        self.stage_cost_weight = torch.tensor(stage_cost_weight, device=device, dtype=torch.float32)
+        self.terminal_cost_weight = torch.tensor(terminal_cost_weight, device=device, dtype=torch.float32)
+        
+        # 车辆参数
+        self.delta_t = delta_t
+        self.wheel_base = wheel_base
+        self.max_steer_abs = max_steer_abs
+        self.max_vel_abs = max_vel_abs
+        
+        # 参考路径（转换为GPU张量加速最近点搜索）
+        self.ref_path = torch.tensor(ref_path, device=device, dtype=torch.float32)
+        
+        # 控制序列（GPU张量）
+        self.u_prev = torch.zeros((self.T, self.dim_u), device=device, dtype=torch.float32)
+        
+        # 最近点索引
+        self.prev_waypoints_idx = 0
+        
+        # 可视化开关
         self.visualize_optimal_traj = visualize_optimal_traj
         self.visualze_sampled_trajs = visualze_sampled_trajs
 
-        # 车辆参数
-        self.delta_t = delta_t # 仿真步长[s]
-        self.wheel_base = wheel_base # 车辆轴距[m]
-        self.max_steer_abs = max_steer_abs # 最大转向角[rad]
-        self.max_vel_abs = max_vel_abs # 最大速度[m/s]
-        self.ref_path = ref_path # 参考路径[n x 4]，每一行是[x, y, yaw, v]
-
-        # 上次控制序列
-        self.u_prev = np.zeros((self.T, self.dim_u))
-
-        # 上次最近点索引
-        self.prev_waypoints_idx = 0
-
-    """
-    计算最优控制
-    """
     def calc_control_input(self, observed_x: np.ndarray):
-        """calculate optimal control input"""
-        # 加载上次计算的控制序列
-        u = self.u_prev
-        # 获取观测状态
-        x0 = observed_x.squeeze()
-        # 计算参考路径基于当前位置的最近索引
-        self._get_nearest_waypoint(x0[0], x0[1], update_prev_idx=True)
-        if self.prev_waypoints_idx >= self.ref_path.shape[0]-1:
-            print("[ERROR] Reached the end of the reference path.")
-            raise IndexError
-        # 状态成本列表
-        S = np.zeros((self.K))
-        # 生成噪声
-        epsilon = self._calc_epsilon(self.Sigma, self.K, self.T, self.dim_u)    
-        # 准备控制输入序列
-        v = np.zeros((self.K, self.T, self.dim_u)) 
-
-        # loop for 0 ~ K-1 samples
-        for k in range(self.K):         
-            # 设定采样初始值
-            x = x0
-            current_vel = 0.0
-            # 单条轨迹前向推进
-            for t in range(1, self.T+1):
-                # 添加噪声的比例
-                if k < (1.0-self.param_exploration)*self.K:
-                    # 在上次最优控制序列上添加噪声
-                    v[k, t-1] = u[t-1] + epsilon[k, t-1]
-                else:
-                    # 仅添加噪声
-                    v[k, t-1] = epsilon[k, t-1]
-                # 前向推进
-                u_clamped = self._g(v[k, t-1]) 
-                x = self._F(x, u_clamped)
-                current_vel = u_clamped[0] 
-                # 添加阶段代价  
-                S[k] += self._c(x, current_vel) + self.param_gamma * u[t-1].T @ np.linalg.inv(self.Sigma) @ v[k, t-1]
-            # 添加终端代价
-            S[k] += self._phi(x, current_vel)
-
-        # compute information theoretic weights for each sample
-        w = self._compute_weights(S)
-        # calculate w_k * epsilon_k
-        w_epsilon = np.zeros((self.T, self.dim_u))
-        for t in range(0, self.T): # loop for time step t = 0 ~ T-1
-            for k in range(self.K):
-                w_epsilon[t] += w[k] * epsilon[k, t]
-
-        # apply moving average filter for smoothing input sequence
-        w_epsilon = self._moving_average_filter(xx=w_epsilon, window_size=10)
-        # update control input sequence
+        """GPU加速的最优控制计算"""
+        # 观测状态转换为GPU张量（[4] -> [1,4]）
+        x0 = torch.tensor(observed_x, device=self.device, dtype=torch.float32).squeeze().unsqueeze(0)
+        
+        # 查找最近参考点
+        self._get_nearest_waypoint(x0[0, 0], x0[0, 1], update_prev_idx=True)
+        if self.prev_waypoints_idx >= self.ref_path.shape[0] - 1:
+            raise IndexError("[ERROR] Reached end of reference path")
+        
+        # 生成噪声（GPU上批量生成 K x T x 2 的噪声）
+        epsilon = self._calc_epsilon()  # 形状: [K, T, 2]
+        
+        # 生成带噪声的控制输入（批量操作）
+        u = self.u_prev.clone()  # 形状: [T, 2]
+        v = torch.zeros((self.K, self.T, self.dim_u), device=self.device, dtype=torch.float32)
+        
+        # 区分探索性采样和利用性采样（向量化操作）
+        explore_mask = torch.arange(self.K, device=self.device) >= (1.0 - self.param_exploration) * self.K
+        v[~explore_mask] = u + epsilon[~explore_mask]  # 利用性采样（大部分）
+        v[explore_mask] = epsilon[explore_mask]  # 探索性采样（小部分）
+        
+        # 批量计算所有轨迹的成本（GPU并行核心）
+        S = self._batch_compute_costs(x0, v, u)  # 形状: [K]
+        
+        # 计算权重（向量化操作）
+        w = self._compute_weights(S)  # 形状: [K]
+        
+        # 加权融合噪声（批量矩阵运算）
+        w_epsilon = torch.sum(w.view(-1, 1, 1) * epsilon, dim=0)  # 形状: [T, 2]
+        
+        # 平滑控制输入
+        w_epsilon = self._moving_average_filter(w_epsilon, window_size=10)
+        
+        # 更新控制序列
         u += w_epsilon
-
-        # calculate optimal trajectory
-        optimal_traj = np.zeros((self.T, self.dim_x))
-        if self.visualize_optimal_traj:
-            x = x0
-            for t in range(0, self.T): # loop for time step t = 0 ~ T-1
-                x = self._F(x, self._g(u[t]))
-                optimal_traj[t] = x
-
-        # # calculate sampled trajectories
-        sampled_traj_list = np.zeros((self.K, self.T, self.dim_x))
-        sorted_idx = np.argsort(S) # sort samples by state cost, 0th is the best sample
-        if self.visualze_sampled_trajs:
-            for k in sorted_idx:
-                x = x0
-                for t in range(0, self.T): # loop for time step t = 0 ~ T-1
-                    x = self._F(x, self._g(v[k, t]))
-                    sampled_traj_list[k, t] = x
-
-        # update privious control input sequence (shift 1 step to the left)
+        
+        # 计算最优轨迹（可选）
+        optimal_traj = self._compute_optimal_trajectory(x0, u) if self.visualize_optimal_traj else None
+        
+        # 计算采样轨迹（可选）
+        sampled_traj_list = self._compute_sampled_trajectories(x0, v) if self.visualze_sampled_trajs else None
+        
+        # 更新历史控制序列
         self.u_prev[:-1] = u[1:]
         self.u_prev[-1] = u[-1]
         
-        return optimal_traj,sampled_traj_list,np.array([float(u[0][0]), float(u[0][1])]) # return first control input [v, steer]
+        # 返回CPU numpy数组（便于后续处理）
+        return (
+            optimal_traj.cpu().numpy() if optimal_traj is not None else None,
+            sampled_traj_list.cpu().numpy() if sampled_traj_list is not None else None,
+            u[0].cpu().numpy()
+        )
 
-    """
-    生成噪声序列
-    """
-    def _calc_epsilon(self, sigma: np.ndarray, size_sample: int, size_time_step: int, size_dim_u: int) -> np.ndarray:
-        """sample epsilon"""
-        # 检查协方差矩阵是否与控制维度匹配
-        if sigma.shape[0] != sigma.shape[1] or sigma.shape[0] != size_dim_u or size_dim_u < 1:
-            print("[ERROR] sigma must be a square matrix with the size of size_dim_u.")
-            raise ValueError
+    def _calc_epsilon(self):
+        """在GPU上批量生成多元正态噪声"""
+        # 生成 K*T 个噪声向量，再重塑为 [K, T, 2]
+        mean = torch.zeros(self.dim_u, device=self.device)
+        epsilon = torch.distributions.MultivariateNormal(mean, covariance_matrix=self.Sigma).sample(
+            (self.K, self.T)
+        )
+        return epsilon  # 形状: [K, T, 2]
 
-        # 零均值高斯噪声 1x(size_dim_u)
-        mu = np.zeros((size_dim_u))
-        # 生成噪声
-        # size_sample条轨迹，每个轨迹size_time_step个采样点，每个采样点的噪声维度为2
-        # epsilon为 (size_sample) x (size_time_step) x (2) 维度
-        epsilon = np.random.multivariate_normal(mu, sigma, (size_sample, size_time_step))
-        return epsilon
-
-    """
-    截断超出限制部分
-    """
-    def _g(self, v: np.ndarray) -> float:
-        """clamp input"""
-        # limit control inputs
-        v[0] = np.clip(v[0], -self.max_vel_abs, self.max_vel_abs) # limit steering input
-        v[1] = np.clip(v[1], -self.max_steer_abs, self.max_steer_abs) # limit acceleraiton input
-        return v
-    
-    """
-    状态转移过程
-    """
-    def _F(self, x_t: np.ndarray, v_t: np.ndarray) -> np.ndarray:
-        """calculate next state of the vehicle"""
-        # get previous state variables
-        x, y, theta, beta= x_t
-        vel, steer = v_t
-
-        # prepare params
-        l = self.wheel_base
-        dt = self.delta_t
-
-        # update state variables
-        new_x = x + vel * np.cos(theta) * dt
-        new_y = y + vel * np.sin(theta) * dt
-        new_theta = theta + vel * np.tan(steer)/l * dt
-        new_theta = ((new_theta + 2.0*np.pi) % (2.0*np.pi)) # normalize theta to [0, 2*pi]
-        new_beta = steer
-
-        # return updated state
-        x_t_plus_1 = np.array([new_x, new_y, new_theta, new_beta])
-        return x_t_plus_1
-
-    """
-    根据状态计算阶段成本
-    """
-    def _c(self, x_t: np.ndarray, current_vel: float) -> float:
-        """calculate stage cost"""
-        # parse x_t
-        x, y, theta, beta = x_t
-        theta = ((theta + 2.0*np.pi) % (2.0*np.pi)) # normalize theta to [0, 2*pi]
-
-        # calculate stage cost
-        _, ref_x, ref_y, ref_theta, ref_v = self._get_nearest_waypoint(x, y)
-        stage_cost = self.stage_cost_weight[0]*(x-ref_x)**2 + self.stage_cost_weight[1]*(y-ref_y)**2 + \
-                     self.stage_cost_weight[2]*(theta-ref_theta)**2 + self.stage_cost_weight[3]*(current_vel - ref_v)**2
-        return stage_cost
-    
-    """
-    根据状态计算终端成本
-    """
-    def _phi(self, x_T: np.ndarray, current_vel: float) -> float:
-        """calculate terminal cost"""
-        # parse x_T
-        x, y, theta, beta = x_T
-        theta = ((theta + 2.0*np.pi) % (2.0*np.pi)) # normalize theta to [0, 2*pi]
-
-        # calculate terminal cost
-        _, ref_x, ref_y, ref_theta, ref_v = self._get_nearest_waypoint(x, y)
-        terminal_cost = self.terminal_cost_weight[0]*(x-ref_x)**2 + self.terminal_cost_weight[1]*(y-ref_y)**2 + \
-                        self.terminal_cost_weight[2]*(theta-ref_theta)**2 + self.terminal_cost_weight[3]*(current_vel - ref_v)**2
-        return terminal_cost
-
-    """
-    计算权重信息
-    """
-    def _compute_weights(self, S: np.ndarray) -> np.ndarray:
-        """compute weights for each sample"""
-        # prepare buffer
-        w = np.zeros((self.K))
-
-        # calculate rho
-        rho = S.min()
-
-        # calculate eta
-        eta = 0.0
-        for k in range(self.K):
-            eta += np.exp( (-1.0/self.param_lambda) * (S[k]-rho) )
-
-        # calculate weight
-        for k in range(self.K):
-            w[k] = (1.0 / eta) * np.exp( (-1.0/self.param_lambda) * (S[k]-rho) )
-        return w
-    
-    """
-    滑动窗口滤波
-    """
-    def _moving_average_filter(self, xx: np.ndarray, window_size: int) -> np.ndarray:
-        """apply moving average filter for smoothing input sequence
-        Ref. https://zenn.dev/bluepost/articles/1b7b580ab54e95
-        Note: The original MPPI paper uses the Savitzky-Golay Filter for smoothing control inputs.
+    def _batch_compute_costs(self, x0, v, u):
         """
-        b = np.ones(window_size)/window_size
-        dim = xx.shape[1]
-        xx_mean = np.zeros(xx.shape)
+        批量计算所有K条轨迹的总成本（GPU并行）
+        x0: 初始状态 [1, 4]
+        v: 带噪声的控制输入 [K, T, 2]
+        u: 基础控制输入 [T, 2]
+        """
+        K, T = self.K, self.T
+        total_cost = torch.zeros(K, device=self.device)
+        
+        # 初始化所有轨迹的状态 [K, 4]
+        x = x0.repeat(K, 1)  # 复制初始状态到K条轨迹
+        
+        for t in range(T):
+            # 批量限幅控制输入 [K, 2]
+            u_clamped = self._g(v[:, t, :])  # 每条轨迹的t时刻控制输入
+            
+            # 批量更新状态 [K, 4] -> [K, 4]
+            x = self._F(x, u_clamped)
+            
+            # 批量计算阶段成本 [K]
+            current_vel = u_clamped[:, 0]  # 每条轨迹的当前速度 [K]
+            stage_cost = self._c(x, current_vel)  # 阶段成本 [K]
+            
+            # 批量计算控制成本（向量化矩阵运算）
+            control_cost = self.param_gamma * torch.sum(
+                u[t].unsqueeze(0) @ self.inv_Sigma @ v[:, t, :].unsqueeze(2), 
+                dim=(1, 2)
+            )  # 形状: [K]
+            
+            # 累加成本
+            total_cost += stage_cost + control_cost
+        
+        # 添加终端成本
+        total_cost += self._phi(x, current_vel)
+        
+        return total_cost
 
+    def _F(self, x: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """
+        批量状态转移（GPU并行）
+        x: [K, 4] 状态 (x, y, theta, beta)
+        v: [K, 2] 控制输入 (vel, steer)
+        返回: [K, 4] 下一状态
+        """
+        x_pos = x[:, 0]
+        y_pos = x[:, 1]
+        theta = x[:, 2]
+        vel = v[:, 0]
+        steer = v[:, 1]
+        
+        # 批量计算运动学模型（所有操作均为向量化）
+        dt = self.delta_t
+        l = self.wheel_base
+        
+        new_x = x_pos + vel * torch.cos(theta) * dt
+        new_y = y_pos + vel * torch.sin(theta) * dt
+        new_theta = theta + vel * torch.tan(steer) / l * dt
+        new_theta = (new_theta + 2 * math.pi) % (2 * math.pi)  # 归一化航向角
+        new_beta = steer
+        
+        return torch.stack([new_x, new_y, new_theta, new_beta], dim=1)
+
+    def _g(self, v: torch.Tensor) -> torch.Tensor:
+        """批量控制输入限幅 [K, 2] -> [K, 2]"""
+        v_clamped = v.clone()
+        v_clamped[:, 0] = torch.clamp(v_clamped[:, 0], -self.max_vel_abs, self.max_vel_abs)
+        v_clamped[:, 1] = torch.clamp(v_clamped[:, 1], -self.max_steer_abs, self.max_steer_abs)
+        return v_clamped
+
+    def _c(self, x: torch.Tensor, current_vel: torch.Tensor) -> torch.Tensor:
+        """批量计算阶段成本 [K, 4] -> [K]"""
+        x_pos = x[:, 0]
+        y_pos = x[:, 1]
+        theta = x[:, 2]
+        theta = (theta + 2 * math.pi) % (2 * math.pi)
+        
+        # 批量查找每条轨迹当前位置的最近参考点
+        _, ref_x, ref_y, ref_theta, ref_v = self._batch_get_nearest_waypoint(x_pos, y_pos)
+        
+        # 向量化计算成本
+        dx = x_pos - ref_x
+        dy = y_pos - ref_y
+        d_theta = theta - ref_theta
+        d_vel = current_vel - ref_v
+        
+        return (
+            self.stage_cost_weight[0] * dx**2 +
+            self.stage_cost_weight[1] * dy**2 +
+            self.stage_cost_weight[2] * d_theta**2 +
+            self.stage_cost_weight[3] * d_vel**2
+        )
+
+    def _batch_get_nearest_waypoint(self, x: torch.Tensor, y: torch.Tensor):
+        """批量查找K条轨迹位置对应的最近参考点（GPU加速）"""
+        K = x.shape[0]
+        prev_idx = self.prev_waypoints_idx
+        end_idx = min(prev_idx + 200, self.ref_path.shape[0])
+        ref_segment = self.ref_path[prev_idx:end_idx]  # 参考路径片段
+        
+        # 计算所有轨迹到参考点的距离（向量化）
+        dx = x.view(-1, 1) - ref_segment[:, 0].view(1, -1)  # [K, N]
+        dy = y.view(-1, 1) - ref_segment[:, 1].view(1, -1)  # [K, N]
+        dist_sq = dx**2 + dy**2  # [K, N]
+        
+        # 找到每条轨迹的最近点索引
+        min_idx = torch.argmin(dist_sq, dim=1)  # [K]
+        nearest_idx = prev_idx + min_idx  # [K]
+        
+        # 提取参考点信息
+        ref_x = ref_segment[min_idx, 0]
+        ref_y = ref_segment[min_idx, 1]
+        ref_theta = ref_segment[min_idx, 2]
+        ref_v = ref_segment[min_idx, 3]
+        
+        return nearest_idx, ref_x, ref_y, ref_theta, ref_v
+
+    # 以下为其他辅助函数（与CPU版本逻辑一致，但基于PyTorch实现）
+    def _phi(self, x: torch.Tensor, current_vel: torch.Tensor) -> torch.Tensor:
+        """批量计算终端成本"""
+        x_pos = x[:, 0]
+        y_pos = x[:, 1]
+        theta = x[:, 2]
+        theta = (theta + 2 * math.pi) % (2 * math.pi)
+        
+        _, ref_x, ref_y, ref_theta, ref_v = self._batch_get_nearest_waypoint(x_pos, y_pos)
+        
+        dx = x_pos - ref_x
+        dy = y_pos - ref_y
+        d_theta = theta - ref_theta
+        d_vel = current_vel - ref_v
+        
+        return (
+            self.terminal_cost_weight[0] * dx**2 +
+            self.terminal_cost_weight[1] * dy**2 +
+            self.terminal_cost_weight[2] * d_theta**2 +
+            self.terminal_cost_weight[3] * d_vel**2
+        )
+
+    def _compute_weights(self, S: torch.Tensor) -> torch.Tensor:
+        """向量化计算权重"""
+        rho = torch.min(S)
+        exp_terms = torch.exp((-1.0 / self.param_lambda) * (S - rho))
+        eta = torch.sum(exp_terms)
+        return exp_terms / eta
+
+    def _moving_average_filter(self, xx: torch.Tensor, window_size: int = 10) -> torch.Tensor:
+        """彻底解决尺寸匹配的GPU滑动平均滤波：有效卷积+手动补值"""
+        # 1. 初始化输出（与输入形状完全一致：[T, dim]）
+        T, dim = xx.shape
+        xx_mean = torch.zeros_like(xx, device=self.device)
+        
+        # 2. 定义滑动平均卷积核（权重归一化）
+        kernel = torch.ones(window_size, device=self.device, dtype=torch.float32) / window_size
+        # 重塑卷积核为conv1d要求的格式：[out_channel, in_channel, kernel_size]
+        kernel = kernel.view(1, 1, -1)
+        
         for d in range(dim):
-            xx_mean[:,d] = np.convolve(xx[:,d], b, mode="same")
-            n_conv = math.ceil(window_size/2)
-            xx_mean[0,d] *= window_size/n_conv
+            # --------------------------
+            # 步骤1：提取当前维度的控制序列（[T]）
+            # --------------------------
+            x = xx[:, d].view(1, 1, T)  # 重塑为conv1d输入格式：[batch=1, channel=1, length=T]
+            
+            # --------------------------
+            # 步骤2：执行有效卷积（无padding，输出长度会缩短）
+            # --------------------------
+            # 有效卷积输出长度 = T - window_size + 1（如T=20、window_size=10时，输出长度=11）
+            conv_out = torch.conv1d(input=x, weight=kernel, padding=0, stride=1)
+            conv_out = conv_out.squeeze()  # 压缩为1D张量：[T - window_size + 1]
+            
+            # --------------------------
+            # 步骤3：手动补值，将输出长度补到T（关键！）
+            # --------------------------
+            # 计算需要补的长度：前补n_left个，后补n_right个
+            n_left = window_size // 2 - 1  # 前补4个（window_size=10时）
+            n_right = window_size // 2      # 后补5个（window_size=10时）
+            # 补值策略：复制边界值（避免引入突变）
+            left_pad = torch.full((n_left,), conv_out[0], device=self.device)  # 前补：用第一个元素
+            right_pad = torch.full((n_right,), conv_out[-1], device=self.device)  # 后补：用最后一个元素
+            # 拼接得到最终长度=T的序列
+            padded_out = torch.cat([left_pad, conv_out, right_pad], dim=0)
+            
+            # --------------------------
+            # 步骤4：原有边界修正（保持逻辑不变）
+            # --------------------------
+            n_conv = math.ceil(window_size / 2)
+            padded_out[0] *= window_size / n_conv
             for i in range(1, n_conv):
-                xx_mean[i,d] *= window_size/(i+n_conv)
-                xx_mean[-i,d] *= window_size/(i + n_conv - (window_size % 2)) 
+                padded_out[i] *= window_size / (i + n_conv)
+                padded_out[-i] *= window_size / (i + n_conv - (window_size % 2))
+            
+            # --------------------------
+            # 步骤5：赋值到输出（尺寸完全匹配）
+            # --------------------------
+            xx_mean[:, d] = padded_out
+
         return xx_mean
-    
 
     def _get_nearest_waypoint(self, x: float, y: float, update_prev_idx: bool = False):
-        """search the closest waypoint to the vehicle on the reference path"""
-        # 仅仅检索前方一定范围的点以节省计算时间
-        SEARCH_IDX_LEN = 200 # [points] forward search range
-        # 记录上次最近点的索引以加速搜索
+        """单一点的最近参考点查找（用于初始化）"""
         prev_idx = self.prev_waypoints_idx
-        dx = [x - ref_x for ref_x in self.ref_path[prev_idx:(prev_idx + SEARCH_IDX_LEN), 0]]
-        dy = [y - ref_y for ref_y in self.ref_path[prev_idx:(prev_idx + SEARCH_IDX_LEN), 1]]
-        d = [idx ** 2 + idy ** 2 for (idx, idy) in zip(dx, dy)]
-        min_d = min(d)
-        # 在已有检索上递增索引
-        nearest_idx = d.index(min_d) + prev_idx
-
-        # 获取参考点信息
-        ref_x = self.ref_path[nearest_idx,0]
-        ref_y = self.ref_path[nearest_idx,1]
-        ref_yaw = self.ref_path[nearest_idx,2]
-        ref_v = self.ref_path[nearest_idx,3]
-
-        # 更新最近点索引
+        end_idx = min(prev_idx + 100, self.ref_path.shape[0])
+        ref_segment = self.ref_path[prev_idx:end_idx]
+        
+        dx = x - ref_segment[:, 0]
+        dy = y - ref_segment[:, 1]
+        dist_sq = dx**2 + dy**2
+        min_idx = torch.argmin(dist_sq)
+        nearest_idx = prev_idx + min_idx
+        
         if update_prev_idx:
-            self.prev_waypoints_idx = nearest_idx
+            self.prev_waypoints_idx = nearest_idx.item()  # 转为Python标量
+        
+        return (
+            nearest_idx.item(),
+            ref_segment[min_idx, 0].item(),
+            ref_segment[min_idx, 1].item(),
+            ref_segment[min_idx, 2].item(),
+            ref_segment[min_idx, 3].item()
+        )
 
-        return nearest_idx, ref_x, ref_y, ref_yaw, ref_v
+    def _compute_optimal_trajectory(self, x0, u):
+        """计算最优轨迹（批量单轨迹）"""
+        traj = torch.zeros(self.T, self.dim_x, device=self.device)
+        x = x0[0].clone()  # 初始状态 [4]
+        for t in range(self.T):
+            x = self._F(x.unsqueeze(0), u[t].unsqueeze(0))[0]  # 单步更新
+            traj[t] = x
+        return traj
+
+    def _compute_sampled_trajectories(self, x0, v):
+        """批量计算所有采样轨迹"""
+        K, T = self.K, self.T
+        traj = torch.zeros(K, T, self.dim_x, device=self.device)
+        x = x0.repeat(K, 1)  # 初始化所有轨迹 [K, 4]
+        
+        for t in range(T):
+            u_clamped = self._g(v[:, t, :])
+            x = self._F(x, u_clamped)
+            traj[:, t, :] = x
+        
+        return traj
+    

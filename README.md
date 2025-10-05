@@ -1,5 +1,28 @@
 # Mppi
 
+## Prerequisite
+
+- `python=3.9`
+- `ir-sim=2.5.0`
+- `numpy=2.0.2`
+- `torch=2.8.0`
+
+## Installation
+
+```shell
+git clone https://github.com/whsleep/mppi.git
+cd mppi
+pip install -r requirements.txt
+```
+
+## Run examples
+
+```shell
+python run.py
+```
+
+## Demonstration
+
 ![mppi_demo](./animation/animation.gif)
 
 # References

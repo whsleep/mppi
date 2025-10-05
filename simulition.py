@@ -1,4 +1,5 @@
 import numpy as np
+import time
 from irsim.env import EnvBase
 from MppiSolver import MppiplanSolver
 
@@ -34,11 +35,13 @@ class SIM_ENV:
             self.env.render()
 
         self.robot_state = self.env.get_robot_state()
+        star_time = time.time()
         opt_traj ,samp_traj, action_input_list = self.solver.calc_control_input(self.robot_state)
+        print("Mppi solver time:", time.time() - star_time)
         # print(samp_traj.shape[0])
         for i in range(samp_traj.shape[0]):
             list_of_arrays = [np.array(row).reshape(-1, 1) for row in samp_traj[i]]
-            self.env.draw_trajectory(list_of_arrays, traj_type='-g', refresh=True)
+            self.env.draw_trajectory(list_of_arrays, traj_type='--g', refresh=True)
         # 将二维数组转换为列表
         list_of_arrays = [np.array(row).reshape(-1, 1) for row in opt_traj]
         self.env.draw_trajectory(list_of_arrays, traj_type='-r', refresh=True)
